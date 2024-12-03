@@ -4,7 +4,15 @@ const { MongoClient } = require('mongodb');
 const config = require('config');
 
 const dbURI = config.get('db');
+
 let dbConnection = null;
+const COLLECTIONS = {
+  USERS: 'users',
+  SUPPLIERS: 'suppliers',
+  PRODUCTS: 'products',
+  GLOBAL_PRODUCTS: 'globalProducts',
+  TRANSACTIONS: 'transactions',
+};
 
 async function connectDB() {
   try {
@@ -27,4 +35,4 @@ function getDB() {
   return dbConnection;
 }
 
-module.exports = { connectDB, getDB };
+module.exports = { connectDB, getDB,COLLECTIONS, };

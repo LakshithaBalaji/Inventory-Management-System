@@ -1,50 +1,43 @@
 const express = require('express');
 const router = express.Router();
-const { auth,authorizeRoles}= require('../middleware/auth')
-const { getDB,connectDB } = require('../config/db');
-const { createUser, findUserByEmail, findUsersByStatus,generateAuthToken, saveRefreshTokenToDB,validatePassword, updateUserStatus } = require('../models/user');
+const { auth, authorizeRoles } = require('../middleware/auth');
+const { getDB, connectDB } = require('../config/db');
+const { createUser, findUserByEmail, findUsersByStatus, generateAuthToken, saveRefreshTokenToDB, validatePassword, updateUserDetails, updateUserStatus } = require('../models/user');
 const bcrypt = require('bcrypt');
-// User Registration Route
+const {ObjectId}=require('mongodb');
 router.post('/register', async (req, res) => {
     try {
         const newUser = await createUser(req.body);
         const token = generateAuthToken(newUser);
-        res.status(201).send({ user: newUser, token }); 
+        res.status(201).send({ user: newUser, token });
     } catch (error) {
         console.error("Error registering user:", error);
         res.status(400).json({ error: error.message });
     }
 });
 
-// User Login Route
 router.post('/login', async (req, res) => {
     const { email, password } = req.body;
     const db = getDB();
-    // Find user by email
     const user = await db.collection('users').findOne({ email });
 
-    // Validate user credentials
     if (!user || !bcrypt.compareSync(password, user.password)) {
         return res.status(400).send('Invalid email or password.');
     }
 
-    // Generate Access and Refresh Tokens
     const { accessToken, refreshToken } = generateAuthToken(user);
-
-    // Save refresh token to the database
     await saveRefreshTokenToDB(user._id, refreshToken);
 
-    // Send both tokens in the response
     res.status(200).send({
         accessToken,
         refreshToken
     });
 });
-// Get All Users (regardless of status)
-router.get('/',[auth, authorizeRoles('admin')], async (req, res) => {
+
+router.get('/', [auth, authorizeRoles('admin')], async (req, res) => {
     try {
         const db = getDB();
-        const users = await db.collection('users').find().toArray();  // Get all users
+        const users = await db.collection('users').find().toArray();
         res.status(200).send(users);
     } catch (error) {
         console.error("Error fetching users:", error);
@@ -52,17 +45,19 @@ router.get('/',[auth, authorizeRoles('admin')], async (req, res) => {
     }
 });
 
-router.get('/active',[auth, authorizeRoles('admin')], async (req, res) => {
-    const { status } = req.query;  // Optional query parameter to filter by status
+router.get('/status', [auth, authorizeRoles('admin')], async (req, res) => {
+    const { status } = req.query;
     try {
-        const users = status ? await findUsersByStatus(status) : await findUsersByStatus('active');
+        const users = status
+            ? await findUsersByStatus(status)
+            : await findUsersByStatus('active');
         res.status(200).send(users);
     } catch (error) {
-        console.error("Error fetching users:", error);
+        console.error("Error fetching users:", error.message);
         res.status(500).send("An error occurred while fetching users.");
     }
 });
-// Get User by ID
+
 router.get('/:userId', async (req, res) => {
     const { userId } = req.params;
     try {
@@ -75,9 +70,7 @@ router.get('/:userId', async (req, res) => {
     }
 });
 
-
-// Update user status (active, deactivated, suspended)
-router.patch('/update-status/:userId',[auth, authorizeRoles('admin','manager')], async (req, res) => {
+router.patch('/update-status/:userId', [auth, authorizeRoles('admin', 'manager')], async (req, res) => {
     const { userId } = req.params;
     const { status } = req.body;
 
@@ -89,29 +82,28 @@ router.patch('/update-status/:userId',[auth, authorizeRoles('admin','manager')],
         res.status(400).send(error.message);
     }
 });
-//update user
 
-router.put('/:userId',auth, async (req, res) => {
+router.put('/:userId', auth, authorizeRoles('admin', 'manager'), async (req, res) => {
     const { userId } = req.params;
-    const { name, email, address } = req.body;
+    const userDetails = req.body;
+
     try {
-        const db = getDB();
-        const result = await db.collection('users').updateOne(
-            { _id: new ObjectId(userId) },
-            { $set: { name, email, address } }
-        );
-        if (result.modifiedCount === 0) return res.status(404).send('User not found');
-        res.status(200).send('User updated successfully');
+        if (userId !== req.user._id.toString()) {
+            return res.status(403).send('You are not authorized to update this user.');
+        }
+
+        const updatedUser = await updateUserDetails(userId, userDetails);
+
+        res.status(200).send(updatedUser);
     } catch (error) {
         console.error("Error updating user:", error);
-        res.status(500).send("An error occurred while updating the user.");
+        res.status(500).send(`An error occurred while updating the user: ${error.message}`);
     }
 });
-// User Logout
+
 router.post('/logout', async (req, res) => {
     const { userId } = req.body;
     const db = getDB();
-    // Remove the refresh token from the database
     await db.collection('users').updateOne(
         { _id: userId },
         { $unset: { refreshToken: "" } }
@@ -120,8 +112,7 @@ router.post('/logout', async (req, res) => {
     res.status(200).send('Logged out successfully.');
 });
 
-// Delete User
-router.delete('/:userId',auth,async (req, res) => {
+router.delete('/delete/:userId', auth, async (req, res) => {
     const { userId } = req.params;
     try {
         const db = getDB();
@@ -133,6 +124,5 @@ router.delete('/:userId',auth,async (req, res) => {
         res.status(500).send("An error occurred while deleting the user.");
     }
 });
-
 
 module.exports = router;

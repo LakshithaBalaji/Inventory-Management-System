@@ -1,8 +1,7 @@
-const { getDB } = require('../config/db');
+const { getDB,COLLECTIONS } = require('../config/db');
 const Joi = require('joi');
 const { ObjectId } = require('mongodb');
 
-// Validation schema for updating supplier details
 const validateSupplier = (data) => {
     const schema = Joi.object({
         phone: Joi.string(),
@@ -18,22 +17,19 @@ const validateSupplier = (data) => {
 
 async function getSuppliers() {
     const db = getDB();
-    return await db.collection('suppliers').find().toArray();
+    return await db.collection(COLLECTIONS.SUPPLIERS).find().toArray();
 }
 
-// Get a supplier by userId
 async function getSupplierByUserId(userId) {
     const db = getDB();
-    return await db.collection('suppliers').findOne({ userId: userId });
+    return await db.collection(COLLECTIONS.SUPPLIERS).findOne({ userId: userId });
 }
 
-// Get supplier details by ID
 async function getSupplierById(id) {
     const db = getDB();
-    return await db.collection('suppliers').findOne({ _id: new ObjectId(id) });
+    return await db.collection(COLLECTIONS.SUPPLIERS).findOne({ _id: new ObjectId(id) });
 }
 
-// Update supplier details by ID
 async function updateSupplier(id, updateData) {
     const db = getDB();
     const { error } = validateSupplier(updateData);
@@ -41,13 +37,11 @@ async function updateSupplier(id, updateData) {
         throw new Error(error.details[0].message);
     }
 
-    // Prepare updated data
     const updatedData = {};
 
     if (updateData.phone) updatedData.phone = updateData.phone;
     if (updateData.address) updatedData.address = updateData.address;
-    
-    // Only update supplierDetails if provided in the update data
+
     if (updateData.supplierDetails) {
         if (updateData.supplierDetails.organisation_name) {
             updatedData['supplierDetails.organisation_name'] = updateData.supplierDetails.organisation_name;
@@ -60,27 +54,22 @@ async function updateSupplier(id, updateData) {
         }
     }
 
-    const result = await db.collection('suppliers').updateOne(
-        { _id: new ObjectId(id) },  // Use ObjectId for the query
-        { $set: updatedData }  // Set the new values
+    const result = await db.collection(COLLECTIONS.SUPPLIERS).updateOne(
+        { _id: new ObjectId(id) },
+        { $set: updatedData }
     );
 
-    // Handle update result
     if (result.matchedCount === 0) {
         throw new Error("Supplier not found or failed to update.");
     }
 
-    console.log("Update successful:", result);  // Log the result for verification
-
-    // Return the updated supplier information
-    const updatedSupplier = await db.collection('suppliers').findOne({ _id: new ObjectId(id) });
+    const updatedSupplier = await db.collection(COLLECTIONS.SUPPLIERS).findOne({ _id: new ObjectId(id) });
     return updatedSupplier;  
 }
 
-// Delete supplier by ID
 async function deleteSupplier(id) {
     const db = getDB();
-    const result = await db.collection('suppliers').deleteOne({ _id: new ObjectId(id) });
+    const result = await db.collection(COLLECTIONS.SUPPLIERS).deleteOne({ _id: new ObjectId(id) });
     if (result.deletedCount === 0) throw new Error("Supplier not found or failed to delete.");
     return { message: "Supplier deleted successfully" };
 }

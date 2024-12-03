@@ -1,214 +1,284 @@
 const { ObjectId } = require('mongodb');
 const Joi = require('joi');
-const { getDB } = require('../config/db');
-const jwt = require('jsonwebtoken');
+const { getDB,COLLECTIONS } = require('../config/db');
 
-// Joi Schema for validating transaction 
 const transactionSchema = Joi.object({
-    transactionType: Joi.string().valid('purchase', 'sale').required(), 
+    transaction_type: Joi.string().valid('purchase', 'sale').required(),
     products: Joi.array().items(
         Joi.object({
-            productId: Joi.string().hex().length(24).required(), 
-            quantity: Joi.number().min(1).required(), 
+            product_id: Joi.string().hex().length(24).required(),
+            quantity: Joi.number().min(1).required(),
+            stock: Joi.number().min(1).required(),
             price: Joi.number().min(0).required(),
         }).required()
-    ).min(1).required(), 
-    customerId: Joi.string().hex().length(24).optional(),
-    supplierId: Joi.string().hex().length(24).optional(), 
+    ).min(1).required(),
     status: Joi.string().valid('pending', 'approved', 'rejected', 'purchased').optional(),
-    date: Joi.date().default(() => new Date()) // Sets default current date if not provided
+    date: Joi.date().default(() => new Date())
 });
 
-// Create Sales Order
-const createSalesOrder = async (salesData, customerId) => {
+
+async function createSalesOrder(products, customerId) {
     const db = getDB();
-    const { products } = salesData;
+    const transaction = {
+        customer_id: ObjectId.createFromHexString(customerId),
+        products: [],
+        totalAmount: 0,
+        status: 'pending',
+        date: new Date(),
+    };
+
     let totalAmount = 0;
 
-   
-    for (const item of products) {
-        const productId = new ObjectId(item.productId);
+    // Convert each product_id to ObjectId and calculate the total amount
+    for (let product of products) {
+        const productId = ObjectId.createFromHexString(product.product_id); // Convert string to ObjectId
+        const productDetails = await db.collection(COLLECTIONS.PRODUCTS).findOne({ _id: productId });
 
-        
-        const globalProduct = await db.collection('products').findOne({ _id: productId });
-
-        if (!globalProduct) {
-            throw new Error(`Product with ID: ${item.productId} not found in global inventory.`);
+        if (!productDetails) {
+            throw new Error(`Product with ID ${product.product_id} not found.`);
         }
 
-    
-        const purchasableQuantity = globalProduct.stock - globalProduct.minStockLevel;
-        if (item.quantity > purchasableQuantity) {
-            throw new Error(`Insufficient purchasable quantity for product ID: ${item.productId}. Max purchase quantity is ${purchasableQuantity}.`);
-        }
+        totalAmount += productDetails.price * product.quantity;
 
-        totalAmount += item.quantity * globalProduct.price;
-    }
-
-  
-    const salesOrder = {
-        customerId,
-        products,
-        totalAmount,
-        status: 'pending',  
-        date: new Date(),
-    };
-
-   
-    await db.collection('transactions').insertOne({
-        ...salesOrder,
-        transactionType: 'sale',
-    });
-
-    return salesOrder;
-};
-
-const confirmSalesOrder = async (orderId, confirmation) => {
-    const db = getDB();
-
-    
-    const order = await db.collection('transactions').findOne({ _id: new ObjectId(orderId), transactionType: 'sale', status: 'pending' });
-
-    if (!order) {
-        throw new Error('Order not found or already confirmed.');
-    }
-
-    
-    if (confirmation === 'yes') {
-        await db.collection('transactions').updateOne(
-            { _id: new ObjectId(orderId) },
-            { $set: { status: 'purchased' } }
-        );
-
-        for (const item of order.products) {
-            const globalProduct = await db.collection('products').findOne({ _id: new ObjectId(item.productId) });
-
-            if (!globalProduct) {
-                throw new Error(`Product with ID: ${item.productId} not found in global inventory.`);
-            }
-
-            await db.collection('products').updateOne(
-                { _id: new ObjectId(item.productId) },
-                { $inc: { stock: -item.quantity } }
-            );
-        }
-
-        return { message: 'Purchase confirmed and stock updated.' };
-    } else {
-        return { message: 'Purchase cancelled.' };
-    }
-};
-
-
-const createPurchaseOrder = async (supplierData, supplierId) => {
-    const db = getDB();
-    const { products } = supplierData;
-  
-    const transaction = {
-        supplierId: supplierId,
-        status: 'pending',  
-        products: [],  
-        date: new Date(),
-    };
-
-  
-    for (const item of products) {
-        const productId = new ObjectId(item.productId);
-
-       
+        // Store the product with ObjectId in the products array
         transaction.products.push({
-            productId: productId,
-            quantity: item.quantity,
-            price: item.price || 0,  
+            product_id: productId, // Store the product_id as ObjectId
+            quantity: product.quantity,
+          
+            price: productDetails.price,
         });
     }
 
-   
-    await db.collection('transactions').insertOne(transaction);
-
-    return { message: 'Purchase order processed for approval.' };
-};
-
-
-
-const approveProduct = async (transactionId) => {
-    const db = getDB();
+    transaction.totalAmount = totalAmount;
 
     try {
-       
-        const transactionObjectId = new ObjectId(transactionId);
+        const result = await db.collection(COLLECTIONS.TRANSACTIONS).insertOne(transaction);
+        return {
+            order_id: result.insertedId,
+            products: transaction.products,
+            totalAmount: totalAmount,
+            status: transaction.status,
+            date: transaction.date,
+            message: "Sales order created successfully and is pending.",
+        };
+    } catch (error) {
+        throw new Error(`Failed to create sales order: ${error.message}`);
+    }
+}
 
-    
-        const transaction = await db.collection('transactions').findOne({
-            _id: transactionObjectId,
+async function confirmSalesOrder(orderId, confirmation, req) {
+    const db = getDB();
+    const customerId = req.user._id;
+
+    try {
+        // Validate `orderId` is a valid ObjectId
+        if (!ObjectId.isValid(orderId)) {
+            throw new Error('Invalid orderId format. It must be a 24-character hexadecimal string.');
+        }
+
+        // Fetch the order with a pending status
+        const order = await db.collection(COLLECTIONS.TRANSACTIONS).findOne({
+            _id: ObjectId.createFromHexString(orderId),
             status: 'pending',
         });
 
-        if (!transaction) {
-            console.error('Transaction not found or already processed.');
-            throw new Error('Transaction not found or already processed.');
+        if (!order) {
+            throw new Error('Order not found or already confirmed.');
         }
 
-        console.log('Transaction found:', transaction);
+        // Check if the order belongs to the current customer
+        if (order.customer_id.toString() !== customerId.toString()) {
+            throw new Error('This order does not belong to the current customer.');
+        }
 
-      
-        for (const item of transaction.products) {
-            const productIdString = item.productId.toString(); 
+        // Handle confirmation logic
+        if (confirmation === 'yes') {
+            // Update order status to 'purchased'
+            await db.collection(COLLECTIONS.TRANSACTIONS).updateOne(
+                { _id: ObjectId.createFromHexString(orderId) },
+                { $set: { status: 'purchased' } }
+            );
 
-            const existingProduct = await db.collection('products').findOne({ _id: new ObjectId(productIdString) });
-
-            if (existingProduct) {
-                
-                const updatedFields = {
-                    $inc: { stock: item.quantity }, 
-                };
-
-               
-                if (item.price && item.price !== existingProduct.price) {
-                    updatedFields.$set = { price: item.price };
+            for (const item of order.products) {
+                let productId = item.product_id;
+                if (!(productId instanceof ObjectId)) {
+                    productId = new ObjectId(productId); // Convert it to ObjectId if it's a string
+                }
+            
+                // Validate productId
+                if (!ObjectId.isValid(productId)) {
+                    throw new Error(`Invalid product ID format for product ${productId}`);
                 }
 
-                // Update the existing product
-                await db.collection('products').updateOne(
-                    { _id: new ObjectId(productIdString) },
-                    updatedFields
+                // Fetch the product from the inventory
+                const globalProduct = await db.collection(COLLECTIONS.PRODUCTS).findOne({ _id: productId });
+                if (!globalProduct) {
+                    throw new Error(`Product with ID: ${productId} not found in global inventory.`);
+                }
+
+                // Check stock availability
+                if (globalProduct.stock < item.quantity) {
+                    throw new Error(`Not enough stock for product ID: ${productId}`);
+                }
+
+                // Log before updating the stock
+                console.log(`Updating stock for product ID: ${productId}, current stock: ${globalProduct.stock}, quantity to deduct: ${item.quantity}`);
+
+                // Update product stock
+                const result = await db.collection(COLLECTIONS.PRODUCTS).updateOne(
+                    { _id: productId },
+                    { $inc: { stock: -item.quantity } }
                 );
-                console.log(`Updated stock for product ${productIdString}.`);
+
+                // Log result of stock update
+                console.log(`Stock updated for product ID: ${productId}, result: ${result.modifiedCount} document(s) modified`);
+            }
+
+            return { message: 'Purchase confirmed and stock updated.' };
+        } else if (confirmation === 'no') {
+            return { message: 'Purchase cancelled.' };
+        } else {
+            throw new Error('Invalid confirmation value. Use "yes" or "no".');
+        }
+    } catch (error) {
+        console.error(`Error confirming purchase: ${error.message}`);
+        throw new Error(`Failed to confirm purchase: ${error.message}`);
+    }
+}
+
+
+
+function isValidObjectId(id) {
+    return ObjectId.isValid(id) && id.length === 24;
+}
+
+async function createPurchaseOrder(supplierData, supplierId) {
+    const db = getDB();
+    const { products } = supplierData;
+
+    const validSupplierId = ObjectId.createFromHexString(supplierId);
+
+    const transaction = {
+        supplier_id: validSupplierId,
+        status: 'pending',
+        products: [],
+        date: new Date(),
+    };
+
+    for (const item of products) {
+        let product_id;
+
+        if (item.product_id) {
+            product_id = ObjectId.createFromHexString(item.product_id);
+        } else {
+            if (!item.product_name || !item.category || !item.price || !item.stock || !item.description) {
+                throw new Error('For new products, product_name, category, price, stock, and description are required.');
+            }
+
+            const placeholderProduct = {
+                product_name: item.product_name,
+                category: item.category,
+                price: item.price,
+                stock: item.stock,
+                description: item.description,
+                supplier_id: validSupplierId,
+                status: 'not available',
+                created_by: validSupplierId,
+                created_on: new Date(),
+                updated_on: new Date(),
+                last_updated_by:validSupplierId,
+            };
+
+            const productInsertResult = await db.collection(COLLECTIONS.PRODUCTS).insertOne(placeholderProduct);
+
+            product_id = productInsertResult.insertedId;
+        }
+
+        transaction.products.push({
+            product_id: product_id,
+            stock: item.stock,
+            price: item.price,
+        });
+    }
+
+    await db.collection(COLLECTIONS.TRANSACTIONS).insertOne(transaction);
+    return { message: 'Purchase order processed for approval.' };
+}
+
+async function approveProduct(transactionId, adminId, minStockLevel, confirmation) {
+    const db = getDB();
+    const transactionObjectId = ObjectId.createFromHexString(transactionId);
+    
+    const transaction = await db.collection(COLLECTIONS.TRANSACTIONS).findOne({
+        _id: transactionObjectId,
+        status: 'pending',
+    });
+
+    if (!transaction) {
+        throw new Error('Transaction not found or already processed.');
+    }
+
+    const adminIdOnly = adminId._id || adminId;
+
+    if (confirmation === 'approve') {
+        for (const item of transaction.products) {
+            const existingProduct = await db.collection(COLLECTIONS.PRODUCTS).findOne({ _id: item.product_id });
+
+            if (existingProduct) {
+                const updatedFields = {
+                    $inc: { stock: item.stock },
+                    $set: {
+                        approved_on: new Date(),
+                        approved_by: ObjectId.createFromHexString(adminIdOnly),
+                        min_stock_level: minStockLevel,
+                    }
+                };
+                
+                if (item.price && item.price !== existingProduct.price) {
+                    updatedFields.$set.price = item.price;
+                }
+
+                await db.collection(COLLECTIONS.PRODUCTS).updateOne({ _id: item.product_id }, updatedFields);
+
             } else {
-               
-                await db.collection('products').insertOne({
-                    _id: new ObjectId(productIdString),
-                    price: item.price || 0, 
-                    stock: item.quantity,
-                    status: 'approved',
-                    supplierId: transaction.supplierId,
-                    date: new Date(),
-                });
-                console.log(`Inserted new product ${productIdString} into products.`);
+                await db.collection(COLLECTIONS.PRODUCTS).updateOne(
+                    { _id: item.product_id },
+                    {
+                        $set: {
+                            stock: item.stock,
+                            price: item.price,
+                            min_stock_level: minStockLevel,
+                            approved_on: new Date(),
+                            approved_by: ObjectId.createFromHexString(adminIdOnly),
+                            status: 'available'
+                        }
+                    },
+                    { upsert: true }
+                );
             }
         }
 
-       
-        await db.collection('transactions').updateOne(
+        await db.collection(COLLECTIONS.TRANSACTIONS).updateOne(
             { _id: transactionObjectId },
             { $set: { status: 'approved' } }
         );
 
         return { message: 'Purchase order approved and inventory updated.' };
-    } catch (err) {
-        console.error('Error in approvePurchaseOrder:', err);
-        throw err;
+
+    } else if (confirmation === 'reject') {
+        await db.collection(COLLECTIONS.TRANSACTIONS).updateOne(
+            { _id: transactionObjectId },
+            { $set: { status: 'rejected' } }
+        );
+
+        return { message: 'Purchase order rejected.' };
     }
-};
-
-
-
-
-
+}
 
 module.exports = {
     createSalesOrder,
     confirmSalesOrder,
     createPurchaseOrder,
-    approveProduct
+    approveProduct,
+    isValidObjectId
 };
